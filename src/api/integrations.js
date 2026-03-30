@@ -1,24 +1,7 @@
-import { base44 } from './base44Client';
-
-
-
-
-export const Core = base44.integrations.Core;
-
-export const InvokeLLM = base44.integrations.Core.InvokeLLM;
-
-export const SendEmail = base44.integrations.Core.SendEmail;
-
-export const SendSMS = base44.integrations.Core.SendSMS;
-
-export const UploadFile = base44.integrations.Core.UploadFile;
-
-export const GenerateImage = base44.integrations.Core.GenerateImage;
-
-export const ExtractDataFromUploadedFile = base44.integrations.Core.ExtractDataFromUploadedFile;
-
-
-
-
-
-
+export const Core = {};
+export const InvokeLLM = () => Promise.resolve('');
+export const SendEmail = () => Promise.resolve({});
+export const SendSMS = () => Promise.resolve({});
+export const UploadFile = () => Promise.resolve({ url: '' });
+export const GenerateImage = () => Promise.resolve({ url: '' });
+export const ExtractDataFromUploadedFile = () => Promise.resolve({});

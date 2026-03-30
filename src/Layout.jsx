@@ -3,7 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { createPageUrl } from "@/utils";
 import { Radio, Home, Mic, User, LogOut, MessageCircle, Settings, Image, Sun, Layers, BarChart3, FileQuestion, Trophy, Moon, BookOpen, Film } from "lucide-react";
 import { FloatingPlayerProvider } from "./components/recording/FloatingPlayer";
-import { base44 } from "@/api/base44Client";
+import { User as CurrentUser } from "@/api/entities";
 import {
   Sidebar,
   SidebarContent,
@@ -197,7 +197,7 @@ export default function Layout({ children, currentPageName }) {
   React.useEffect(() => {
     const fetchUser = async () => {
       try {
-        const currentUser = await base44.auth.me();
+        const currentUser = await CurrentUser.me();
         setUser(currentUser);
       } catch (error) {
         console.error("Error fetching user:", error);
@@ -206,8 +206,8 @@ export default function Layout({ children, currentPageName }) {
     fetchUser();
   }, []);
 
-  const handleLogout = () => {
-    base44.auth.logout();
+  const handleLogout = async () => {
+    await CurrentUser.logout();
   };
 
   return (

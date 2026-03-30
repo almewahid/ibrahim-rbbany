@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { base44 } from '@/api/base44Client';
+
 import { supabase } from '@/lib/supabase';
 
 function Login() {
@@ -14,7 +14,9 @@ function Login() {
     setError('');
     setLoading(true);
     try {
-      await base44.auth.loginWithEmailPassword(email, password);
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+if (error) throw error;
+window.location.href = '/';
     } catch (err) {
       setError('البريد الإلكتروني أو كلمة المرور غير صحيحة');
     } finally {
