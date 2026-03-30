@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { base44 } from '@/api/base44Client';
+import { supabase } from '@/lib/supabase';
 
 function Login() {
   const [email, setEmail] = useState('');
@@ -21,10 +22,15 @@ function Login() {
     }
   };
 
-  const handleGoogleLogin = () => {
-  const returnUrl = 'https://ibrahim-alsherbiny.vercel.app/';
-  window.location.href = `https://app.base44.com/login?app_id=6910333eda261b67d8e0b82f&redirect_uri=${encodeURIComponent(returnUrl)}`;
-  };
+  const handleGoogleLogin = async () => {
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: 'https://ibrahim-rbbany.vercel.app/'
+    }
+  });
+  if (error) setError('حدث خطأ أثناء تسجيل الدخول بـ Google');
+};
 
   return (
     <div style={{
