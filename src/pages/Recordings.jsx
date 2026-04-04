@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Loader2, Sparkles, Filter, TrendingUp, Calendar, User as UserIcon, Layers, Radio, Play, Pause, Download, Eye, Clock, HardDrive } from "lucide-react";
+import { Loader2, Sparkles, Filter, TrendingUp, Calendar, User as UserIcon, Layers, Radio, Play, Pause, Download, Eye, Clock, HardDrive, Monitor, Square } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import SearchBar from "../components/broadcast/SearchBar";
 import RecordingCard from "../components/broadcast/RecordingCard";
@@ -43,6 +43,43 @@ export default function Recordings() {
   const [analyticsData, setAnalyticsData] = useState(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
   const [generatingSummary, setGeneratingSummary] = useState(null);
+
+  // ── تسجيل الشاشة ─────────────────────────────────────────────────────────
+  const [screenRecording, setScreenRecording] = useState(false);
+  const screenMediaRecorder = useRef(null);
+  const screenChunks = useRef([]);
+
+  const startScreenRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      screenMediaRecorder.current = new MediaRecorder(stream);
+      screenChunks.current = [];
+
+      screenMediaRecorder.current.ondataavailable = (e) => screenChunks.current.push(e.data);
+
+      screenMediaRecorder.current.onstop = () => {
+        const blob = new Blob(screenChunks.current, { type: "video/webm" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `تسجيل-${new Date().toLocaleDateString("ar")}.webm`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      screenMediaRecorder.current.start();
+      setScreenRecording(true);
+      stream.getVideoTracks()[0].onended = stopScreenRecording;
+    } catch (err) {
+      console.error("فشل تسجيل الشاشة:", err);
+    }
+  };
+
+  const stopScreenRecording = () => {
+    screenMediaRecorder.current?.stop();
+    setScreenRecording(false);
+  };
+  // ─────────────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -389,9 +426,24 @@ export default function Recordings() {
           animate={{ opacity: 1, y: 0 }}
           className="text-center mb-8"
         >
-          <h1 className="text-4xl font-bold text-gray-900 mb-3">
-            التسجيلات المحفوظة
-          </h1>
+          <div className="flex items-center justify-center gap-4 mb-3">
+            <h1 className="text-4xl font-bold text-gray-900">
+              التسجيلات المحفوظة
+            </h1>
+            <Button
+              onClick={screenRecording ? stopScreenRecording : startScreenRecording}
+              className={screenRecording
+                ? "bg-red-500 hover:bg-red-600 text-white animate-pulse"
+                : "bg-purple-600 hover:bg-purple-700 text-white"
+              }
+              size="sm"
+            >
+              {screenRecording
+                ? <><Square className="w-4 h-4 ml-1" /> إيقاف التسجيل</>
+                : <><Monitor className="w-4 h-4 ml-1" /> تسجيل الشاشة</>
+              }
+            </Button>
+          </div>
           <p className="text-lg text-gray-600">
             استمع إلى البثوث السابقة في أي وقت
           </p>

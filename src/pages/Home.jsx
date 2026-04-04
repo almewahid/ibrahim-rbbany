@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { base44 } from "@/api/base44Client";
+import { supabase } from "@/lib/supabase";
 import { useQuery } from "@tanstack/react-query";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -37,20 +37,29 @@ export default function Home() {
 
   const { data: broadcasts = [], isLoading } = useQuery({
     queryKey: ['broadcasts'],
-    queryFn: () => base44.entities.Broadcast.list("-created_date"),
+    queryFn: async () => {
+  const { data } = await supabase.from('broadcasts').select('*').order('created_date', { ascending: false });
+  return data ?? [];
+},
     refetchInterval: 10000,
   });
 
   const { data: scheduledBroadcasts = [] } = useQuery({
     queryKey: ['scheduledBroadcastsHome'],
-    queryFn: () => base44.entities.Broadcast.filter({ is_scheduled: true, is_live: false }),
+    queryFn: async () => {
+  const { data } = await supabase.from('broadcasts').select('*').eq('is_scheduled', true).eq('is_live', false);
+  return data ?? [];
+},
     refetchInterval: 30000,
   });
 
   // جلب جميع الأغلفة مرة واحدة بدلاً من طلب لكل بث
   const { data: allCovers = [] } = useQuery({
     queryKey: ['allBroadcastCovers'],
-    queryFn: () => base44.entities.BroadcastCover.list("-created_date"),
+    queryFn: async () => {
+  const { data } = await supabase.from('broadcast_covers').select('*').order('created_date', { ascending: false });
+  return data ?? [];
+},
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     retry: 1,

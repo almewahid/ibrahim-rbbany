@@ -1,79 +1,54 @@
-import { createClientFromRequest } from 'npm:@base44/sdk@0.7.1';
+// ============================================================
+// notificationWebSocket.ts — ملاحظة مهمة
+// ============================================================
+// ⚠️  هذا الملف لا يُنشر كـ Edge Function في Supabase.
+//
+// السبب: Edge Functions stateless — لا تدعم WebSocket
+// connections دائمة. الـ Map() في الكود الأصلي تُمسح
+// مع كل طلب جديد → لم يكن يعمل أصلاً في الإنتاج.
+//
+// ✅  البديل الصحيح والمجاني: Supabase Realtime
+// موجود تلقائياً في مشروعك — لا تحتاج أي كود إضافي.
+//
+// ── كيف تستخدمه في الـ Frontend ──────────────────────────
+//
+// import { createClient } from '@supabase/supabase-js'
+// const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+//
+// // استمع للإشعارات الخاصة بالمستخدم الحالي
+// const channel = supabase
+//   .channel('user-notifications')
+//   .on(
+//     'postgres_changes',
+//     {
+//       event:  'INSERT',
+//       schema: 'public',
+//       table:  'notifications',
+//       filter: `user_id=eq.${currentUserId}`,
+//     },
+//     (payload) => {
+//       console.log('إشعار جديد:', payload.new)
+//       // أضف الإشعار لقائمة الإشعارات في الـ UI
+//     }
+//   )
+//   .subscribe()
+//
+// // عند الخروج
+// supabase.removeChannel(channel)
+//
+// ── تفعيل Realtime على جدول notifications ────────────────
+// Dashboard → Database → Replication
+// → اختر جدول notifications → فعّل INSERT
+//
+// ── ping/pong ─────────────────────────────────────────────
+// Supabase Realtime يتولى heartbeat تلقائياً.
+// لا تحتاج كود ping/pong.
+//
+// ── إرسال إشعار من Edge Function ─────────────────────────
+// فقط أدرج صفاً في جدول notifications بـ service role:
+//   await admin.from('notifications').insert({ user_id, ... })
+// Realtime يوصله للـ Frontend فوراً.
+// ============================================================
 
-// Store active WebSocket connections
-const connections = new Map();
-
-Deno.serve(async (req) => {
-  // Check if this is a WebSocket upgrade request
-  if (req.headers.get("upgrade") !== "websocket") {
-    return new Response("Expected WebSocket upgrade", { status: 400 });
-  }
-
-  const { socket, response } = Deno.upgradeWebSocket(req);
-  
-  let userId = null;
-  let base44Client = null;
-
-  socket.onopen = () => {
-    console.log("WebSocket connection opened");
-  };
-
-  socket.onmessage = async (event) => {
-    try {
-      const message = JSON.parse(event.data);
-
-      if (message.type === 'auth') {
-        // Authenticate user
-        const base44 = createClientFromRequest(req);
-        const user = await base44.auth.me();
-        
-        if (user) {
-          userId = user.id;
-          base44Client = base44;
-          connections.set(userId, socket);
-          
-          socket.send(JSON.stringify({
-            type: 'auth_success',
-            userId: user.id
-          }));
-        } else {
-          socket.send(JSON.stringify({
-            type: 'auth_error',
-            message: 'Authentication failed'
-          }));
-        }
-      }
-
-      if (message.type === 'ping') {
-        socket.send(JSON.stringify({ type: 'pong' }));
-      }
-
-    } catch (error) {
-      console.error('WebSocket message error:', error);
-    }
-  };
-
-  socket.onclose = () => {
-    if (userId) {
-      connections.delete(userId);
-    }
-    console.log("WebSocket connection closed");
-  };
-
-  socket.onerror = (error) => {
-    console.error("WebSocket error:", error);
-  };
-
-  return response;
-});
-
-// Export function to send notifications to specific users
-export async function sendNotificationToUser(userId, notification) {
-  const socket = connections.get(userId);
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({
-      type: 'notification',
-      data: notification
-    }));
-  }
-}
+// هذا الملف توثيقي فقط — لا يُنشر.
+export {};

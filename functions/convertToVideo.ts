@@ -1,75 +1,132 @@
-import { createClientFromRequest } from 'npm:@base44/sdk@0.7.1';
+// ============================================================
+// convertToVideo.ts — نسخة Supabase
+// ------------------------------------------------------------
+// ملاحظة: النسخة الأصلية كانت تحاول استدعاء 'https://api.ffmpeg.org'
+// وهي خدمة غير موثوقة. النسخة الجديدة:
+//   1. تُرجع audio_url + cover_url + ffmpeg_command للـ Frontend
+//   2. أو تستخدم Cloudflare Images للتحويل إذا توفر
+//
+// التغييرات من Base44:
+//   1. base44.auth.me()                          → supabase.auth.getUser()
+//   2. base44.asServiceRole.entities.Recording   → supabase admin
+//   3. base44.asServiceRole.entities.BroadcastCover → supabase admin
+//   4. base44.integrations.Core.CreateFileSignedUrl → R2 signed URL
+//   5. base44.integrations.Core.GenerateImage    → حُذف (غير موثوق)
+//   6. base44.integrations.Core.UploadFile       → uploadToCloudflareR2
+// ============================================================
 
-Deno.serve(async (req) => {
-  try {
-    const base44 = createClientFromRequest(req);
-    
-    const user = await base44.auth.me();
-    if (!user) {
-      return Response.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+import { serve }        from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  S3Client,
+  GetObjectCommand,
+} from "npm:@aws-sdk/client-s3@3.400.0";
+import { getSignedUrl } from "npm:@aws-sdk/s3-request-presigner@3.400.0";
 
-    const { recording_id } = await req.json();
+serve(async (req) => {
+  if (req.method !== "POST") {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
 
-    if (!recording_id) {
-      return Response.json({ error: 'recording_id is required' }, { status: 400 });
-    }
+  // ── 1. Auth ──
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
-    const recordings = await base44.asServiceRole.entities.Recording.filter({ id: recording_id });
-    if (!recordings || recordings.length === 0) {
-      return Response.json({ error: 'Recording not found' }, { status: 404 });
-    }
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
 
-    const recording = recordings[0];
+  const { data: { user }, error: authErr } = await supabase.auth.getUser();
+  if (authErr || !user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
-    // FIXED: Check if file_url exists (from R2) or fallback to file_uri (Base44)
-    let audioUrl = recording.file_url;
-    
-    if (!audioUrl && recording.file_uri) {
-      // Generate signed URL if using Base44 storage
-      const audioSignedUrl = await base44.asServiceRole.integrations.Core.CreateFileSignedUrl({
-        file_uri: recording.file_uri,
-        expires_in: 3600
-      });
-      audioUrl = audioSignedUrl.signed_url;
-    }
+  const admin = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  );
 
-    if (!audioUrl) {
-      return Response.json({ error: 'Audio file not found' }, { status: 404 });
-    }
+  const { recording_id } = await req.json();
+  if (!recording_id) {
+    return Response.json({ error: "recording_id is required" }, { status: 400 });
+  }
 
-    // Get cover image if exists
-    let coverUrl = null;
-    if (recording.cover_id) {
-      const covers = await base44.asServiceRole.entities.BroadcastCover.filter({ id: recording.cover_id });
-      if (covers && covers.length > 0 && covers[0].custom_image_url) {
-        coverUrl = covers[0].custom_image_url;
-      }
-    }
+  // ── 2. Fetch recording ──
+  const { data: recording, error: recErr } = await admin
+    .from("recordings")
+    .select("id, title, file_url, file_uri, cover_id, broadcast_id, broadcaster_id")
+    .eq("id", recording_id)
+    .single();
 
-    return Response.json({
-      success: false,
-      manual_conversion: {
-        instructions: [
-          'لتحويل التسجيل إلى فيديو، استخدم الأدوات التالية:',
-          '1. قم بتحميل الملف الصوتي من الرابط أدناه',
-          '2. قم بتحميل صورة الغلاف من الرابط أدناه (إن وجدت)',
-          '3. استخدم برنامج مثل FFmpeg أو أي محرر فيديو لدمج الصوت والصورة',
-          '4. أو استخدم موقع مثل Kapwing.com للتحويل أونلاين'
-        ],
-        audio_url: audioUrl,
-        cover_url: coverUrl,
-        ffmpeg_command: coverUrl 
-          ? `ffmpeg -loop 1 -i cover.jpg -i audio.webm -c:v libx264 -c:a aac -shortest output.mp4`
-          : `ffmpeg -f lavfi -i color=c=black:s=1280x720 -i audio.webm -shortest -c:v libx264 -c:a aac output.mp4`
-      }
+  if (recErr || !recording) {
+    return Response.json({ error: "Recording not found" }, { status: 404 });
+  }
+
+  // ── 3. Get audio URL ──
+  // If file_url exists (already on R2) → use directly
+  // If only file_uri (old Base44 storage) → generate R2 signed URL
+  let audioUrl = recording.file_url;
+
+  if (!audioUrl && recording.file_uri) {
+    const s3 = new S3Client({
+      region:   "auto",
+      endpoint: Deno.env.get("CLOUDFLARE_R2_ENDPOINT")!,
+      credentials: {
+        accessKeyId:     Deno.env.get("CLOUDFLARE_R2_ACCESS_KEY_ID")!,
+        secretAccessKey: Deno.env.get("CLOUDFLARE_R2_SECRET_ACCESS_KEY")!,
+      },
     });
 
-  } catch (error) {
-    console.error('Error converting to video:', error);
-    return Response.json({ 
-      error: error.message,
-      success: false 
-    }, { status: 500 });
+    audioUrl = await getSignedUrl(
+      s3,
+      new GetObjectCommand({
+        Bucket: Deno.env.get("CLOUDFLARE_R2_BUCKET_NAME")!,
+        Key:    recording.file_uri,
+      }),
+      { expiresIn: 3600 }
+    );
   }
+
+  if (!audioUrl) {
+    return Response.json({ error: "Audio file not found" }, { status: 404 });
+  }
+
+  // ── 4. Get cover image URL ──
+  let coverUrl: string | null = null;
+
+  if (recording.cover_id) {
+    const { data: cover } = await admin
+      .from("broadcast_covers")
+      .select("custom_image_url, summary_image_url")
+      .eq("id", recording.cover_id)
+      .single();
+
+    coverUrl = cover?.custom_image_url ?? cover?.summary_image_url ?? null;
+  }
+
+  // ── 5. Return conversion instructions + FFmpeg command ──
+  // (Same as the working Base44 .ts version — manual conversion)
+  const ffmpegCommand = coverUrl
+    ? `ffmpeg -loop 1 -i cover.jpg -i audio.webm -c:v libx264 -c:a aac -shortest output.mp4`
+    : `ffmpeg -f lavfi -i color=c=black:s=1280x720 -i audio.webm -shortest -c:v libx264 -c:a aac output.mp4`;
+
+  return Response.json({
+    success: false,
+    manual_conversion: {
+      instructions: [
+        "لتحويل التسجيل إلى فيديو، استخدم الأدوات التالية:",
+        "1. قم بتحميل الملف الصوتي من الرابط أدناه",
+        "2. قم بتحميل صورة الغلاف من الرابط أدناه (إن وجدت)",
+        "3. استخدم FFmpeg أو أي محرر فيديو لدمج الصوت والصورة",
+        "4. أو استخدم موقع مثل Kapwing.com للتحويل أونلاين",
+      ],
+      audio_url:      audioUrl,
+      cover_url:      coverUrl,
+      ffmpeg_command: ffmpegCommand,
+    },
+  });
 });

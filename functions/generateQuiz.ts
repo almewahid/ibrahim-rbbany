@@ -1,43 +1,110 @@
-import { createClientFromRequest } from 'npm:@base44/sdk@0.8.4';
+// ============================================================
+// generateQuiz.ts — نسخة Supabase
+// ------------------------------------------------------------
+// التغييرات من Base44:
+//   1. base44.auth.me() + role             → supabase + profiles
+//   2. base44.entities.Recording.filter    → supabase.from("recordings")
+//   3. base44.entities.Broadcast.filter    → supabase.from("broadcasts")
+//   4. base44.integrations.Core.InvokeLLM  → Anthropic API
+//   5. base44.asServiceRole.entities.Quiz.create       → supabase insert
+//   6. base44.asServiceRole.entities.QuizQuestion      → حُذف
+//      ملاحظة: في مخطط Supabase الأسئلة مخزنة كـ JSONB
+//      داخل جدول quizzes مباشرة (حقل questions) —
+//      لا يوجد جدول QuizQuestion منفصل.
+// ============================================================
 
-Deno.serve(async (req) => {
-  try {
-    const base44 = createClientFromRequest(req);
-    const user = await base44.auth.me();
-    
-    if (!user || (user.role !== 'admin' && user.custom_role !== 'admin')) {
-      return Response.json({ error: 'Unauthorized' }, { status: 401 });
+import { serve }        from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+serve(async (req) => {
+  if (req.method !== "POST") {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
+
+  // ── 1. Auth: admin only ──
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+
+  const { data: { user }, error: authErr } = await supabase.auth.getUser();
+  if (authErr || !user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .single();
+
+  if (!profile || profile.role !== "admin") {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const admin = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  );
+
+  // ── 2. Parse body ──
+  const {
+    recording_id,
+    broadcast_id,
+    series_id,
+    num_questions = 10,
+    difficulty    = "متوسط",
+  } = await req.json();
+
+  // ── 3. Fetch content for context (replaces: base44.entities.X.filter) ──
+  let content = "";
+  let title   = "";
+
+  if (recording_id) {
+    const { data: rec } = await admin
+      .from("recordings")
+      .select("title, description")
+      .eq("id", recording_id)
+      .single();
+    if (rec) {
+      title   = rec.title;
+      content = `عنوان: ${rec.title}\nوصف: ${rec.description ?? ""}`;
     }
-
-    const { recording_id, broadcast_id, series_id, num_questions = 10, difficulty = "متوسط" } = await req.json();
-
-    let content = "";
-    let title = "";
-
-    if (recording_id) {
-      const recordings = await base44.entities.Recording.filter({ id: recording_id });
-      if (recordings.length > 0) {
-        const recording = recordings[0];
-        title = recording.title;
-        content = `عنوان: ${recording.title}\nوصف: ${recording.description || ""}`;
-      }
-    } else if (broadcast_id) {
-      const broadcasts = await base44.entities.Broadcast.filter({ id: broadcast_id });
-      if (broadcasts.length > 0) {
-        const broadcast = broadcasts[0];
-        title = broadcast.title;
-        content = `عنوان: ${broadcast.title}\nوصف: ${broadcast.description || ""}`;
-      }
+  } else if (broadcast_id) {
+    const { data: bc } = await admin
+      .from("broadcasts")
+      .select("title, description")
+      .eq("id", broadcast_id)
+      .single();
+    if (bc) {
+      title   = bc.title;
+      content = `عنوان: ${bc.title}\nوصف: ${bc.description ?? ""}`;
     }
+  }
 
-    const difficultyPrompts = {
-      "سهل": "أسئلة سهلة ومباشرة",
-      "متوسط": "أسئلة متوسطة الصعوبة تتطلب فهماً جيداً",
-      "صعب": "أسئلة صعبة تتطلب تحليلاً عميقاً"
-    };
+  if (!content) {
+    return Response.json({ error: "recording_id or broadcast_id is required" }, { status: 400 });
+  }
 
-    const response = await base44.integrations.Core.InvokeLLM({
-      prompt: `أنت معلم متخصص في العلوم الشرعية. قم بإنشاء ${num_questions} أسئلة ${difficultyPrompts[difficulty]} بناءً على المحتوى التالي:
+  // ── 4. Call Anthropic (replaces: base44.integrations.Core.InvokeLLM) ──
+  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (!anthropicKey) {
+    return Response.json({ error: "AI API key not configured" }, { status: 500 });
+  }
+
+  const difficultyMap: Record<string, string> = {
+    "سهل":   "أسئلة سهلة ومباشرة",
+    "متوسط": "أسئلة متوسطة الصعوبة تتطلب فهماً جيداً",
+    "صعب":   "أسئلة صعبة تتطلب تحليلاً عميقاً",
+  };
+
+  const prompt = `أنت معلم متخصص في العلوم الشرعية. قم بإنشاء ${num_questions} أسئلة ${difficultyMap[difficulty] ?? "متوسطة"} بناءً على المحتوى التالي:
 
 ${content}
 
@@ -48,66 +115,77 @@ ${content}
 - أضف شرحاً مختصراً للإجابة الصحيحة
 - يجب أن تكون الأسئلة متنوعة (حفظ، فهم، تطبيق)
 
-أرجع البيانات بصيغة JSON فقط.`,
-      response_json_schema: {
-        type: "object",
-        properties: {
-          questions: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                question_text: { type: "string" },
-                options: {
-                  type: "array",
-                  items: { type: "string" }
-                },
-                correct_answer: { type: "string" },
-                explanation: { type: "string" }
-              }
-            }
-          }
-        }
-      }
-    });
-
-    const quiz = await base44.asServiceRole.entities.Quiz.create({
-      title: `اختبار: ${title}`,
-      description: `اختبار تم توليده تلقائياً للمحاضرة: ${title}`,
-      recording_id: recording_id || null,
-      broadcast_id: broadcast_id || null,
-      series_id: series_id || null,
-      difficulty: difficulty,
-      is_ai_generated: true,
-      is_active: true,
-      total_questions: response.questions.length
-    });
-
-    for (let i = 0; i < response.questions.length; i++) {
-      const q = response.questions[i];
-      await base44.asServiceRole.entities.QuizQuestion.create({
-        quiz_id: quiz.id,
-        question_text: q.question_text,
-        question_type: "اختيار_من_متعدد",
-        options: q.options,
-        correct_answer: q.correct_answer,
-        explanation: q.explanation || "",
-        order_number: i + 1,
-        points: 1
-      });
+أجب فقط بـ JSON بهذا الشكل بدون أي نص إضافي:
+{
+  "questions": [
+    {
+      "question": "نص السؤال",
+      "options": ["الخيار 1", "الخيار 2", "الخيار 3", "الخيار 4"],
+      "correct_answer": 0,
+      "explanation": "شرح الإجابة"
     }
+  ]
+}`;
 
-    return Response.json({
-      success: true,
-      quiz_id: quiz.id,
-      message: `تم توليد ${response.questions.length} سؤال بنجاح`
-    });
+  const aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type":      "application/json",
+      "x-api-key":         anthropicKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model:      "claude-haiku-4-5-20251001",
+      max_tokens: 3000,
+      messages:   [{ role: "user", content: prompt }],
+    }),
+  });
 
-  } catch (error) {
-    console.error('Error generating quiz:', error);
-    return Response.json({ 
-      success: false, 
-      error: error.message 
-    }, { status: 500 });
+  if (!aiRes.ok) {
+    console.error("Anthropic error:", await aiRes.text());
+    return Response.json({ error: "AI generation failed", success: false }, { status: 502 });
   }
+
+  const aiData  = await aiRes.json();
+  const rawText = aiData.content?.[0]?.text ?? "{}";
+
+  let questions = [];
+  try {
+    const clean  = rawText.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean);
+    questions    = parsed.questions ?? [];
+  } catch (e) {
+    console.error("Failed to parse AI response:", rawText);
+    return Response.json({ error: "Invalid AI response", success: false }, { status: 500 });
+  }
+
+  // ── 5. Save quiz to Supabase ──
+  // الأسئلة تُخزن كـ JSONB في حقل questions (من phase2 SQL)
+  // لا يوجد جدول QuizQuestion منفصل في مخططنا
+  const { data: quiz, error: quizErr } = await admin
+    .from("quizzes")
+    .insert({
+      title:        `اختبار: ${title}`,
+      description:  `اختبار تم توليده تلقائياً للمحاضرة: ${title}`,
+      recording_id: recording_id ?? null,
+      broadcast_id: broadcast_id ?? null,
+      series_id:    series_id    ?? null,
+      questions,                          // JSONB array
+      passing_score: 70,
+      is_active:     true,
+      created_by:    user.id,
+    })
+    .select("id")
+    .single();
+
+  if (quizErr || !quiz) {
+    console.error("Failed to create quiz:", quizErr);
+    return Response.json({ error: "Failed to save quiz", success: false }, { status: 500 });
+  }
+
+  return Response.json({
+    success:  true,
+    quiz_id:  quiz.id,
+    message:  `تم توليد ${questions.length} سؤال بنجاح`,
+  });
 });
